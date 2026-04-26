@@ -15,14 +15,12 @@ async function main() {
   mkdirSync(staticDir, { recursive: true });
   mkdirSync(funcDir, { recursive: true });
 
-  // Copy static client assets
   const clientDist = join(root, "dist/client");
   if (existsSync(clientDist)) {
     cpSync(clientDist, staticDir, { recursive: true });
     console.log("✓ Copied static assets to .vercel/output/static/");
   }
 
-  // Bundle server with esbuild using CJS format (handles dynamic require)
   const serverEntry = join(root, "dist/server/server.js");
   if (existsSync(serverEntry)) {
     console.log("Bundling server with esbuild (CJS)...");
@@ -38,15 +36,48 @@ async function main() {
     console.log("✓ Bundled server to function directory (server.cjs)");
   }
 
-  // Create the Vercel function entry point
-  // Use createRequire to load the CJS server bundle from ESM
+  // index.mjs - properly convert Node.js IncomingMessage to web Request
   const funcEntry = `import { createRequire } from "module";
 const require = createRequire(import.meta.url);
-const server = require("./server.cjs");
+const serverModule = require("./server.cjs");
+const server = serverModule.default || serverModule;
 
-export default async function handler(req) {
-  const s = server.default || server;
-  return s.fetch(req);
+export default async function handler(req, res) {
+  // Build full URL from Node.js IncomingMessage
+  const host = req.headers['x-forwarded-host'] || req.headers['host'] || 'localhost';
+  const proto = req.headers['x-forwarded-proto'] || 'https';
+  const url = \`\${proto}://\${host}\${req.url || '/'}\`;
+
+  // Build headers
+  const headers = new Headers();
+  for (const [key, val] of Object.entries(req.headers)) {
+    if (val) headers.set(key, Array.isArray(val) ? val.join(', ') : val);
+  }
+
+  // Read body for POST/PUT/PATCH
+  let body = undefined;
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    body = Buffer.concat(chunks);
+    if (body.length === 0) body = undefined;
+  }
+
+  const webReq = new Request(url, {
+    method: req.method,
+    headers,
+    body,
+    duplex: body ? 'half' : undefined,
+  });
+
+  const webRes = await server.fetch(webReq);
+
+  res.statusCode = webRes.status;
+  for (const [key, val] of webRes.headers.entries()) {
+    res.setHeader(key, val);
+  }
+  const buf = await webRes.arrayBuffer();
+  res.end(Buffer.from(buf));
 }
 
 export const config = {
@@ -56,16 +87,14 @@ export const config = {
   writeFileSync(join(funcDir, "index.mjs"), funcEntry);
   console.log("✓ Created function entry: index.mjs");
 
-  // Vercel function config
   writeFileSync(join(funcDir, ".vc-config.json"), JSON.stringify({
     runtime: "nodejs22.x",
     handler: "index.mjs",
     launcherType: "Nodejs",
-    shouldAddHelpers: true,
+    shouldAddHelpers: false,
   }, null, 2));
   console.log("✓ Created .vc-config.json");
 
-  // Vercel routing config
   writeFileSync(join(vercelOut, "config.json"), JSON.stringify({
     version: 3,
     routes: [
@@ -77,8 +106,6 @@ export const config = {
   console.log("✓ Created .vercel/output/config.json");
 
   console.log("\n✅ Vercel output ready at .vercel/output/");
-  console.log("   Static: .vercel/output/static/");
-  console.log("   Function: .vercel/output/functions/index.func/");
 }
 
 main().catch((err) => {
