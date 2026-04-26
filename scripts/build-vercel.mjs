@@ -1,44 +1,45 @@
-#!/usr/bin/env node
-/**
- * Post-build script: converts TanStack Start dist/ output into
- * Vercel Build Output API v3 format (.vercel/output/).
- * 
- * The dist/server/server.js default export has a .fetch(request) method
- * (Web Fetch API compatible), so we can use it directly.
- */
-import { mkdir, cp, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
-import path from "node:path";
+import { build } from "esbuild";
+import { existsSync, mkdirSync, cpSync, writeFileSync } from "fs";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
 
-const root = process.cwd();
-const vercelOut = path.join(root, ".vercel/output");
-const staticDir = path.join(vercelOut, "static");
-const funcDir = path.join(vercelOut, "functions/index.func");
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const root = join(__dirname, "..");
+const vercelOut = join(root, ".vercel/output");
+const staticDir = join(vercelOut, "static");
+const funcDir = join(vercelOut, "functions/index.func");
 
 async function main() {
   console.log("Building Vercel output structure...");
 
-  await mkdir(staticDir, { recursive: true });
-  await mkdir(funcDir, { recursive: true });
+  mkdirSync(staticDir, { recursive: true });
+  mkdirSync(funcDir, { recursive: true });
 
   // Copy static client assets
-  const clientDist = path.join(root, "dist/client");
+  const clientDist = join(root, "dist/client");
   if (existsSync(clientDist)) {
-    await cp(clientDist, staticDir, { recursive: true });
+    cpSync(clientDist, staticDir, { recursive: true });
     console.log("✓ Copied static assets to .vercel/output/static/");
   }
 
-  // Copy server bundle
-  const serverDist = path.join(root, "dist/server");
-  if (existsSync(serverDist)) {
-    await cp(serverDist, funcDir, { recursive: true });
-    console.log("✓ Copied server bundle to function directory");
+  // Bundle server with esbuild - bundle all dependencies into a single file
+  const serverEntry = join(root, "dist/server/server.js");
+  if (existsSync(serverEntry)) {
+    console.log("Bundling server with esbuild...");
+    await build({
+      entryPoints: [serverEntry],
+      bundle: true,
+      platform: "node",
+      target: "node22",
+      format: "esm",
+      outfile: join(funcDir, "server.js"),
+      external: ["node:*"],
+    });
+    console.log("✓ Bundled server to function directory");
   }
 
   // Create the Vercel function entry point
-  // server.js default export has a .fetch(Request) => Response method
-  const funcEntry = `
-import server from "./server.js";
+  const funcEntry = `import server from "./server.js";
 
 export default async function handler(req) {
   return server.fetch(req);
@@ -47,13 +48,12 @@ export default async function handler(req) {
 export const config = {
   runtime: "nodejs22.x",
 };
-`.trim();
-
-  await writeFile(path.join(funcDir, "index.mjs"), funcEntry);
+`;
+  writeFileSync(join(funcDir, "index.mjs"), funcEntry);
   console.log("✓ Created function entry: index.mjs");
 
   // Vercel function config
-  await writeFile(path.join(funcDir, ".vc-config.json"), JSON.stringify({
+  writeFileSync(join(funcDir, ".vc-config.json"), JSON.stringify({
     runtime: "nodejs22.x",
     handler: "index.mjs",
     launcherType: "Nodejs",
@@ -61,15 +61,11 @@ export const config = {
   }, null, 2));
   console.log("✓ Created .vc-config.json");
 
-  // Vercel routing config - serve static assets, route everything else to function
-  await writeFile(path.join(vercelOut, "config.json"), JSON.stringify({
+  // Vercel routing config
+  writeFileSync(join(vercelOut, "config.json"), JSON.stringify({
     version: 3,
     routes: [
-      {
-        src: "^/assets/(.*)$",
-        headers: { "Cache-Control": "public, max-age=31536000, immutable" },
-        continue: true,
-      },
+      { src: "^/assets/(.*)$", headers: { "Cache-Control": "public, max-age=31536000, immutable" }, continue: true },
       { handle: "filesystem" },
       { src: "/(.*)", dest: "/index" },
     ],
