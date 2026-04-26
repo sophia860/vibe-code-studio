@@ -22,27 +22,31 @@ async function main() {
     console.log("✓ Copied static assets to .vercel/output/static/");
   }
 
-  // Bundle server with esbuild - bundle all dependencies into a single file
+  // Bundle server with esbuild using CJS format (handles dynamic require)
   const serverEntry = join(root, "dist/server/server.js");
   if (existsSync(serverEntry)) {
-    console.log("Bundling server with esbuild...");
+    console.log("Bundling server with esbuild (CJS)...");
     await build({
       entryPoints: [serverEntry],
       bundle: true,
       platform: "node",
       target: "node22",
-      format: "esm",
-      outfile: join(funcDir, "server.js"),
+      format: "cjs",
+      outfile: join(funcDir, "server.cjs"),
       external: ["node:*"],
     });
-    console.log("✓ Bundled server to function directory");
+    console.log("✓ Bundled server to function directory (server.cjs)");
   }
 
   // Create the Vercel function entry point
-  const funcEntry = `import server from "./server.js";
+  // Use createRequire to load the CJS server bundle from ESM
+  const funcEntry = `import { createRequire } from "module";
+const require = createRequire(import.meta.url);
+const server = require("./server.cjs");
 
 export default async function handler(req) {
-  return server.fetch(req);
+  const s = server.default || server;
+  return s.fetch(req);
 }
 
 export const config = {
